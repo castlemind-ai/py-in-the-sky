@@ -1,0 +1,107 @@
+# Example wealth simulation config (anonymized)
+
+current_age: 35
+retirement_age: 50
+life_expectancy: 90
+num_simulations: 10000
+inflation_mean: 0.03
+inflation_std: 0.01
+target_wealth: 500000
+accumulation_return: 0.065
+method: "mc"
+
+tax:
+  income_rate: 0.35
+  capital_gains_rate: 0.20
+  roth_rate: 0.0
+
+assets:
+  - name: "Roth IRA"
+    value: 50000
+    mean_return: 0.065
+    std_dev: 0.15
+    tax_type: "roth"
+
+  - name: "401k"
+    value: 200000
+    mean_return: 0.065
+    std_dev: 0.15
+    tax_type: "traditional"
+
+  - name: "Brokerage"
+    value: 300000
+    mean_return: 0.065
+    std_dev: 0.15
+    tax_type: "taxable"
+
+  - name: "Company Stock"
+    value: 500000
+    mean_return: 0.10
+    std_dev: 0.30
+    tax_type: "taxable"
+
+  - name: "Cash"
+    value: 50000
+    mean_return: 0.01
+    std_dev: 0.005
+    tax_type: "cash"
+
+mortgage:
+  purchase_price: 800000
+  down_payment_pct: 0.20
+  interest_rate: 0.06
+  monthly_payment: 3836
+  purchase_date: "2022-01-01"
+  non_mortgage_monthly: 1500
+
+contributions:
+  - name: "Brokerage savings"
+    monthly_amount: 3000
+    target_account: "Brokerage"
+    is_variable: false
+
+  - name: "401k contributions"
+    monthly_amount: 1875
+    target_account: "401k"
+    is_variable: false
+
+  - name: "RSU vesting"
+    monthly_amount: 8000
+    target_account: "Company Stock"
+    is_variable: true
+    std_dev_pct: 0.20
+
+plans_529:
+  - name: "Child 1 529"
+    current_value: 10000
+    monthly_contribution: 500
+    mean_return: 0.065
+    child_college_start_year: 14
+
+spending:
+  categories:
+    school: 20000
+    eating_out: 12000
+    groceries: 10000
+    car: 8000
+    travel: 10000
+    healthcare: 8000
+    other: 10000
+  school_end_years: [14]
+
+future_costs:
+  - name: "Child 1 College"
+    amount: 50000
+    year: 14
+    duration: 4
+    inflation_adjusted: true
+
+black_swans:
+  - name: "Medical Emergency"
+    probability: 0.02
+    cost: 100000
+
+  - name: "Market Crash"
+    probability: 0.05
+    cost: 0
+    portfolio_impact: -0.30
