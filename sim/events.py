@@ -38,20 +38,26 @@ def amortize_mortgage(mortgage: MortgageConfig, total_months: int) -> float:
 
 
 def annual_mortgage_step(principal: float, mortgage: MortgageConfig) -> tuple[float, float]:
-    """Simulate one year of mortgage payments.
+    """Simulate one year of mortgage payments using monthly amortization.
 
     Returns (new_principal, annual_mortgage_cost).
+    Uses the same monthly logic as the accumulation phase for consistency.
     If principal is paid off, mortgage cost drops to zero.
     """
     if principal <= 0:
         return 0.0, 0.0
 
-    annual_interest = principal * mortgage.interest_rate
-    annual_payment = mortgage.monthly_payment * 12
-    principal_paid = annual_payment - annual_interest
-    new_principal = max(principal - principal_paid, 0)
+    monthly_rate = mortgage.interest_rate / 12
+    total_paid = 0.0
+    for _ in range(12):
+        if principal <= 0:
+            break
+        month_interest = principal * monthly_rate
+        principal_paid = mortgage.monthly_payment - month_interest
+        principal = max(principal - principal_paid, 0)
+        total_paid += mortgage.monthly_payment
 
-    return new_principal, annual_payment
+    return principal, total_paid
 
 
 def resolve_spending_year(

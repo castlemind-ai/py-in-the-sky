@@ -130,14 +130,17 @@ def run(config: SimConfig) -> SimResult:
     # Pre-compute 529 values at retirement
     total_529 = sum(accum.plan_529_values.values())
 
-    # Map 529 plans to college start years for offset calculation
-    plan_529_by_college_year: dict[int, float] = {}
+    # Map 529 plans to annual offsets across all 4 college years
+    plan_529_offsets_by_year: dict[int, float] = {}
     for plan in config.plans_529:
         # College start year relative to retirement
         college_yr_from_retirement = plan.child_college_start_year - config.years_to_retirement
-        if college_yr_from_retirement >= 0:
-            val = accum.plan_529_values.get(plan.name, 0)
-            plan_529_by_college_year[college_yr_from_retirement] = val
+        val = accum.plan_529_values.get(plan.name, 0)
+        annual_offset = val / 4
+        for yr_offset in range(4):
+            yr = college_yr_from_retirement + yr_offset
+            if yr >= 0:
+                plan_529_offsets_by_year[yr] = plan_529_offsets_by_year.get(yr, 0) + annual_offset
 
     # Result arrays
     asset_wealth = np.zeros((n, yrs + 1, num_assets))
@@ -202,10 +205,9 @@ def run(config: SimConfig) -> SimResult:
         # 2. Add future costs (college), inflation-adjusted, minus 529 offset
         if future_costs_by_year[year] > 0:
             nominal_costs = future_costs_by_year[year] * infl_factor
-            # Check for 529 offset at this year
-            if year in plan_529_by_college_year:
-                # Spread 529 value over 4 years of college
-                offset_annual = plan_529_by_college_year[year] / 4
+            # Apply 529 offset for this college year (pre-divided across 4 years)
+            if year in plan_529_offsets_by_year:
+                offset_annual = plan_529_offsets_by_year[year]
                 nominal_costs = np.maximum(nominal_costs - offset_annual, 0)
             nominal_spending += nominal_costs
 
@@ -236,7 +238,9 @@ def run(config: SimConfig) -> SimResult:
             if event.portfolio_impact != 0:
                 new_assets[hits] *= (1 + event.portfolio_impact)
 
-        asset_wealth[:, year + 1, :] = new_assets
+        # Floor individual asset values at zero: once ruined, balances stay at zero
+        # rather than continuing to compound negatively.
+        asset_wealth[:, year + 1, :] = np.maximum(new_assets, 0.0)
 
     wealth = asset_wealth.sum(axis=2)
     return SimResult(

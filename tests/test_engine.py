@@ -114,8 +114,8 @@ def test_ruin_detection():
         num_simulations=10,
     )
     result = run(config)
-    # 10 years * $5k = $50k > $10k, should go negative
-    assert np.all(result.wealth[:, -1] < 0)
+    # 10 years * $5k = $50k > $10k initial; portfolio depletes and floors at zero
+    assert np.all(result.wealth[:, -1] == 0)
 
 
 def test_multiple_assets():
