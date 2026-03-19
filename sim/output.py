@@ -125,8 +125,14 @@ def plot_fan_chart(result: SimResult, ax: plt.Axes | None = None) -> plt.Figure 
 
 
 def plot_final_wealth_histogram(result: SimResult, ax: plt.Axes | None = None) -> plt.Figure | None:
-    """Plot distribution of final wealth."""
+    """Plot distribution of final wealth on a log10 x-axis.
+
+    Ruined paths (wealth == 0) are excluded from the histogram and noted in the title.
+    """
     final = result.wealth[:, -1]
+    positive = final[final > 0]
+    n_total = len(final)
+    n_ruined = n_total - len(positive)
 
     created_fig = ax is None
     if ax is None:
@@ -134,19 +140,34 @@ def plot_final_wealth_histogram(result: SimResult, ax: plt.Axes | None = None) -
     else:
         fig = None
 
-    ax.hist(final, bins=80, color="steelblue", alpha=0.7, edgecolor="white")
+    if len(positive) > 0:
+        bins = np.logspace(np.log10(positive.min()), np.log10(positive.max()), 80)
+        ax.hist(positive, bins=bins, color="steelblue", alpha=0.7, edgecolor="white")
 
     if result.config.target_wealth > 0:
         ax.axvline(x=result.config.target_wealth, color="green", linestyle="--",
                     linewidth=2, label=f"Target (${result.config.target_wealth:,.0f})")
 
-    ax.axvline(x=0, color="red", linestyle="--", linewidth=2, label="Ruin")
-    ax.set_xlabel("Final Wealth ($)")
+    ax.set_xscale("log")
+
+    def _dollar_fmt(x, _):
+        if x >= 1e9:
+            return f"${x/1e9:.0f}B"
+        elif x >= 1e6:
+            return f"${x/1e6:.0f}M"
+        elif x >= 1e3:
+            return f"${x/1e3:.0f}K"
+        return f"${x:.0f}"
+
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(_dollar_fmt))
+
+    ruin_note = f"  ({n_ruined:,} ruined paths excluded, {n_ruined/n_total:.1%})" if n_ruined else ""
+    ax.set_xlabel(f"Final Wealth — log₁₀ scale{ruin_note}")
     ax.set_ylabel("Count")
     ax.set_title(f"Distribution of Wealth at Age {result.config.life_expectancy}")
-    ax.legend()
+    if result.config.target_wealth > 0:
+        ax.legend()
     ax.grid(True, alpha=0.3)
-    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"${x:,.0f}"))
 
     if created_fig:
         fig.tight_layout()
