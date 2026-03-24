@@ -184,8 +184,34 @@ def _run_accumulation_bootstrap(
         np.array([a.value for a in config.assets]), (n, 1),
     )  # (n, num_assets)
 
+    # Identify accumulation-phase black swans
+    accum_swans = [e for e in config.black_swans if e.phase == "accumulation"]
+
+    # Build asset name -> index mapping for target_asset lookup
+    asset_name_to_idx = {a.name: i for i, a in enumerate(config.assets)}
+
     for month in range(months):
         values = values * (1 + bootstrap_returns[:, month, :]) + contrib_array[:, month, :]
+
+        # Check for accumulation black swans at year boundaries
+        if accum_swans and (month + 1) % 12 == 0:
+            for event in accum_swans:
+                triggers = rng.random(n) < event.probability
+                if not triggers.any():
+                    continue
+
+                if event.target_asset and event.target_asset in asset_name_to_idx:
+                    # Apply to specific asset only
+                    idx = asset_name_to_idx[event.target_asset]
+                    values[triggers, idx] *= (1 + event.portfolio_impact)
+
+                    # Reduce future contributions for triggered simulations
+                    if event.contribution_impact is not None:
+                        remaining = slice(month + 1, months)
+                        contrib_array[triggers, remaining, idx] *= event.contribution_impact
+                else:
+                    # Apply to entire portfolio
+                    values[triggers, :] *= (1 + event.portfolio_impact)
 
     return {a.name: values[:, i] for i, a in enumerate(config.assets)}
 
@@ -380,14 +406,8 @@ def _generate_drawdown_returns(
         has_historical = any(s is not None for s in asset_sources)
 
         if has_historical:
-            # Build blend weights — use drawdown source's blend weight
-            # For diversified assets (retire_to_source), use the target's blend weight (1.0)
-            blend_weights = []
-            for i, asset in enumerate(config.assets):
-                if asset.retire_to_source is not None:
-                    blend_weights.append(1.0)  # diversified assets use pure bootstrap of target
-                else:
-                    blend_weights.append(asset.bootstrap_blend)
+            # Build blend weights — use each asset's bootstrap_blend
+            blend_weights = [asset.bootstrap_blend for asset in config.assets]
 
             # Bootstrap returns for historical-source assets
             returns = sampler.bootstrap_correlated(

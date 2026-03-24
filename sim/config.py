@@ -106,6 +106,9 @@ class BlackSwanEvent:
     probability: float  # annual probability
     cost: float = 0.0  # direct cost in today's dollars
     portfolio_impact: float = 0.0  # fractional portfolio change, e.g. -0.30
+    phase: str = "drawdown"  # "drawdown" or "accumulation"
+    target_asset: str | None = None  # if set, only affects this asset (accumulation)
+    contribution_impact: float | None = None  # multiplier on future contributions when triggered
 
 
 @dataclass
