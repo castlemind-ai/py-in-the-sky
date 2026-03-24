@@ -2,7 +2,17 @@
 
 import tempfile
 
-from sim.config import Asset, SimConfig, SpendingSchedule, TaxConfig, load_config
+import pytest
+
+from sim.config import (
+    Asset,
+    ConfigValidationError,
+    SimConfig,
+    SpendingSchedule,
+    TaxConfig,
+    load_config,
+    validate_config,
+)
 
 
 def test_load_example_config():
@@ -69,3 +79,60 @@ def test_529_plans_loaded():
     config = load_config("example_config.yaml")
     assert len(config.plans_529) == 1
     assert config.plans_529[0].current_value == 10000
+
+
+# --- Config validation tests ---
+
+
+def _make_config(**overrides) -> SimConfig:
+    defaults = dict(
+        assets=[Asset(name="A", value=100, mean_return=0.05, std_dev=0.1)],
+        spending=SpendingSchedule(categories={}),
+        current_age=35,
+        retirement_age=50,
+        life_expectancy=90,
+    )
+    defaults.update(overrides)
+    return SimConfig(**defaults)
+
+
+def test_validate_retirement_age_must_exceed_current_age():
+    config = _make_config(current_age=50, retirement_age=50)
+    with pytest.raises(ConfigValidationError, match="retirement_age.*must be greater than.*current_age"):
+        validate_config(config)
+
+
+def test_validate_life_expectancy_must_exceed_retirement_age():
+    config = _make_config(retirement_age=50, life_expectancy=50)
+    with pytest.raises(ConfigValidationError, match="life_expectancy.*must be greater than.*retirement_age"):
+        validate_config(config)
+
+
+def test_validate_return_source_csv_missing():
+    config = _make_config(return_sources={"foo": "/nonexistent/path.csv"})
+    with pytest.raises(ConfigValidationError, match="file not found"):
+        validate_config(config)
+
+
+def test_validate_contribution_target_account_missing():
+    from sim.config import Contribution
+    config = _make_config(
+        contributions=[Contribution(name="Save", monthly_amount=100, target_account="NoSuchAsset")],
+    )
+    with pytest.raises(ConfigValidationError, match="does not match any asset"):
+        validate_config(config)
+
+
+def test_validate_asset_return_source_not_in_sources():
+    config = _make_config(
+        assets=[Asset(name="A", value=100, mean_return=0.05, std_dev=0.1, return_source="missing")],
+        method="bootstrap",
+        return_sources={},
+    )
+    with pytest.raises(ConfigValidationError, match="not found in return_sources"):
+        validate_config(config)
+
+
+def test_validate_valid_config_passes():
+    config = _make_config()
+    validate_config(config)  # should not raise

@@ -141,6 +141,59 @@ class SimConfig:
         return self.life_expectancy - self.retirement_age
 
 
+class ConfigValidationError(ValueError):
+    """Raised when config values are invalid."""
+
+
+def validate_config(config: SimConfig) -> None:
+    """Validate a SimConfig, raising ConfigValidationError on problems."""
+    errors: list[str] = []
+
+    if config.retirement_age <= config.current_age:
+        errors.append(
+            f"retirement_age ({config.retirement_age}) must be greater than "
+            f"current_age ({config.current_age})"
+        )
+    if config.life_expectancy <= config.retirement_age:
+        errors.append(
+            f"life_expectancy ({config.life_expectancy}) must be greater than "
+            f"retirement_age ({config.retirement_age})"
+        )
+
+    # Validate return source CSV paths exist (bootstrap mode)
+    for name, csv_path in config.return_sources.items():
+        if not Path(csv_path).exists():
+            errors.append(f"return_sources['{name}'] file not found: {csv_path}")
+
+    # Validate contribution target_account references existing assets
+    asset_names = {a.name for a in config.assets}
+    for c in config.contributions:
+        if c.target_account not in asset_names:
+            errors.append(
+                f"contribution '{c.name}' targets account '{c.target_account}' "
+                f"which does not match any asset name"
+            )
+
+    # Validate asset return_source references exist in return_sources
+    if config.method == "bootstrap":
+        for asset in config.assets:
+            if asset.return_source and asset.return_source not in config.return_sources:
+                errors.append(
+                    f"asset '{asset.name}' has return_source '{asset.return_source}' "
+                    f"not found in return_sources"
+                )
+            if asset.retire_to_source and asset.retire_to_source not in config.return_sources:
+                errors.append(
+                    f"asset '{asset.name}' has retire_to_source '{asset.retire_to_source}' "
+                    f"not found in return_sources"
+                )
+
+    if errors:
+        raise ConfigValidationError(
+            "Invalid configuration:\n  - " + "\n  - ".join(errors)
+        )
+
+
 def load_config(path: str | Path) -> SimConfig:
     """Load a SimConfig from a YAML file."""
     with open(path) as f:
@@ -176,7 +229,7 @@ def load_config(path: str | Path) -> SimConfig:
     # Black swans
     black_swans = [BlackSwanEvent(**bs) for bs in raw.get("black_swans", [])]
 
-    return SimConfig(
+    config = SimConfig(
         assets=assets,
         spending=spending,
         tax=tax,
@@ -197,3 +250,6 @@ def load_config(path: str | Path) -> SimConfig:
         seed=raw.get("seed"),
         target_wealth=raw.get("target_wealth", 0.0),
     )
+
+    validate_config(config)
+    return config

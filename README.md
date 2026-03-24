@@ -145,6 +145,29 @@ black_swans:
     portfolio_impact: -0.30
 ```
 
+## Edge cases and modeling choices
+
+### Return clamping
+
+Annual drawdown returns are clamped at -99% (`engine.py:266`) to prevent mathematically impossible negative portfolio values from extreme return draws. This is a safety floor — real-world losses beyond 99% in a single year are essentially impossible for diversified portfolios.
+
+### Black swan dual behavior
+
+A black swan event can specify both a direct `cost` and a `portfolio_impact` simultaneously. When triggered, the cost is withdrawn proportionally from assets first, then the portfolio impact is applied multiplicatively. This models events like a serious illness (direct medical expense) that also causes income disruption (portfolio drawdown).
+
+### Variable contribution `std_dev_pct`
+
+The `std_dev_pct` field on contributions is a fractional multiplier of the mean monthly amount, not a percentage. For example, `std_dev_pct: 0.40` with `monthly_amount: 8000` produces monthly amounts drawn from `Normal(8000, 3200)`, floored at zero. This is useful for modeling RSU vesting that fluctuates with stock price.
+
+### Config validation
+
+`load_config()` validates that:
+- `retirement_age > current_age`
+- `life_expectancy > retirement_age`
+- All `return_sources` CSV files exist on disk
+- All contribution `target_account` values match an asset name
+- In bootstrap mode, all asset `return_source` and `retire_to_source` keys exist in `return_sources`
+
 ## Historical return data
 
 The `data/` directory contains monthly return CSVs. Two formats are auto-detected:
