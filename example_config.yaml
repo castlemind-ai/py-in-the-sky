@@ -8,7 +8,12 @@ inflation_mean: 0.03
 inflation_std: 0.01
 target_wealth: 500000
 accumulation_return: 0.065
-method: "mc"
+method: "mc"  # or "bootstrap" to sample from historical returns
+
+# Optional: historical return sources for bootstrap mode
+# return_sources:
+#   market: "data/VTI_monthly.csv"
+#   stock: "data/GOOG_monthly.csv"
 
 tax:
   income_rate: 0.35
@@ -39,6 +44,7 @@ assets:
     mean_return: 0.10
     std_dev: 0.30
     tax_type: "taxable"
+    # return_source: "stock"  # uncomment with bootstrap mode
 
   - name: "Cash"
     value: 50000

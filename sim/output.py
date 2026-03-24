@@ -18,21 +18,60 @@ def print_summary(result: SimResult) -> None:
     final = wealth[:, -1]
     n = config.num_simulations
 
-    # Accumulation summary
-    total_at_retirement = sum(accum.asset_values.values())
+    # Accumulation summary — values may be scalars (mc) or arrays (bootstrap)
+    def _fmt_val(v):
+        if isinstance(v, np.ndarray):
+            return f"${np.median(v):,.0f} (median)"
+        return f"${v:,.0f}"
+
+    vals = accum.asset_values
+    first_val = next(iter(vals.values()))
+    if isinstance(first_val, np.ndarray):
+        total_at_retirement = np.median(sum(vals.values()))
+    else:
+        total_at_retirement = sum(vals.values())
+
     print("=" * 65)
     print("ACCUMULATION PHASE")
     print("=" * 65)
     print(f"  Years of saving:        {config.years_to_retirement}")
     print(f"  Portfolio at retirement: ${total_at_retirement:,.0f}")
-    for name, val in accum.asset_values.items():
-        print(f"    {name:>25s}:  ${val:,.0f}")
+    for name, val in vals.items():
+        print(f"    {name:>25s}:  {_fmt_val(val)}")
     if accum.plan_529_values:
         print(f"\n  529 Plans at retirement:")
         for name, val in accum.plan_529_values.items():
             print(f"    {name:>25s}:  ${val:,.0f}")
     if config.mortgage:
         print(f"\n  Mortgage principal remaining: ${accum.mortgage_principal:,.0f}")
+
+    # Report retirement diversification if any assets have retire_to_source
+    diversified = [a for a in config.assets if a.retire_to_source is not None]
+    if diversified:
+        print(f"\n  Retirement diversification:")
+        for asset in diversified:
+            basis = asset.cost_basis if asset.cost_basis is not None else 0.0
+            pre_val = vals[asset.name]
+            if isinstance(pre_val, np.ndarray):
+                median_pre = np.median(pre_val)
+                median_gain = max(median_pre - basis, 0)
+                tax_rate = config.tax.rate_for(asset.tax_type)
+                median_tax = median_gain * tax_rate
+                print(f"    {asset.name}: sell → {asset.retire_to_source} returns")
+                print(f"      Pre-tax value:   ${median_pre:,.0f} (median)")
+                print(f"      Cost basis:      ${basis:,.0f}")
+                print(f"      Cap gains tax:   ${median_tax:,.0f} (median, {tax_rate:.0%} rate)")
+                print(f"      Post-tax value:  ${median_pre - median_tax:,.0f} (median)")
+            else:
+                gain = max(pre_val - basis, 0)
+                tax_rate = config.tax.rate_for(asset.tax_type)
+                tax = gain * tax_rate
+                print(f"    {asset.name}: sell → {asset.retire_to_source} returns")
+                print(f"      Pre-tax value:   ${pre_val:,.0f}")
+                print(f"      Cost basis:      ${basis:,.0f}")
+                print(f"      Cap gains tax:   ${tax:,.0f} ({tax_rate:.0%} rate)")
+                print(f"      Post-tax value:  ${pre_val - tax:,.0f}")
+
     print()
 
     # Drawdown summary

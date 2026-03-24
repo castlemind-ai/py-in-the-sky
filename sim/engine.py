@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -16,13 +17,18 @@ from sim.events import (
     resolve_future_costs,
     resolve_spending_year,
 )
+from sim.returns import ReturnSampler
 
 
 @dataclass
 class AccumulationResult:
-    """Results of the accumulation phase."""
+    """Results of the accumulation phase.
 
-    asset_values: dict[str, float]  # asset name -> value at retirement
+    In mc mode, asset_values are scalars (deterministic).
+    In bootstrap mode, asset_values are arrays of shape (n_sims,).
+    """
+
+    asset_values: dict[str, float | np.ndarray]  # asset name -> value(s) at retirement
     mortgage_principal: float
     plan_529_values: dict[str, float]  # plan name -> value at retirement
     months_elapsed_mortgage: int  # total months of mortgage payments by retirement
@@ -39,34 +45,40 @@ class SimResult:
     config: SimConfig
 
 
-def run_accumulation(config: SimConfig) -> AccumulationResult:
-    """Run the deterministic accumulation phase.
+def _build_sampler(config: SimConfig) -> ReturnSampler | None:
+    """Build a ReturnSampler from config if bootstrap mode with sources."""
+    if config.method != "bootstrap" or not config.return_sources:
+        return None
+    return ReturnSampler.from_config(config.return_sources)
 
-    Grows assets monthly with contributions for years_to_retirement.
+
+def run_accumulation(
+    config: SimConfig,
+    rng: np.random.Generator | None = None,
+    sampler: ReturnSampler | None = None,
+) -> AccumulationResult:
+    """Run the accumulation phase.
+
+    mc mode: deterministic, single blended return for all assets.
+    bootstrap mode: stochastic, per-simulation monthly returns from historical data.
     """
     yrs = config.years_to_retirement
     months = yrs * 12
-
-    # Initialize asset values
-    asset_values = {a.name: a.value for a in config.assets}
-
-    # Use a single blended return rate for all assets during accumulation
-    # (matches R script approach — per-asset volatility only matters in drawdown)
-    monthly_rate = (1 + config.accumulation_return) ** (1 / 12) - 1
+    num_assets = len(config.assets)
+    n = config.num_simulations
 
     # Build contribution map: target_account -> list of contributions
     contrib_map: dict[str, list] = {}
     for c in config.contributions:
         contrib_map.setdefault(c.target_account, []).append(c)
 
-    # Compute mortgage state
+    # Compute mortgage state (deterministic in both modes)
     mort_principal = 0.0
     mort_months_elapsed = 0
     if config.mortgage:
         mort_months_elapsed = months_since_purchase(config.mortgage)
         mort_principal = amortize_mortgage(config.mortgage, mort_months_elapsed)
 
-        # Continue mortgage payments during accumulation
         mort_monthly_rate = config.mortgage.interest_rate / 12
         for _ in range(months):
             if mort_principal <= 0:
@@ -76,22 +88,20 @@ def run_accumulation(config: SimConfig) -> AccumulationResult:
             mort_principal = max(mort_principal - principal_paid, 0)
         mort_months_elapsed += months
 
-    # Grow assets monthly with blended rate + contributions
-    for month in range(months):
-        for name, val in asset_values.items():
-            # Apply blended monthly return
-            asset_values[name] = val * (1 + monthly_rate)
-
-            # Add contributions
-            if name in contrib_map:
-                for c in contrib_map[name]:
-                    asset_values[name] += c.monthly_amount
-
-    # Grow 529 plans
+    # Grow 529 plans (deterministic in both modes)
     plan_529_values = {}
     for plan in config.plans_529:
         monthly_rate = (1 + plan.mean_return) ** (1 / 12) - 1
         plan_529_values[plan.name] = grow_529(plan, months, monthly_rate)
+
+    use_bootstrap = config.method == "bootstrap" and sampler is not None and rng is not None
+
+    if use_bootstrap:
+        asset_values = _run_accumulation_bootstrap(
+            config, rng, sampler, months, n, num_assets, contrib_map,
+        )
+    else:
+        asset_values = _run_accumulation_mc(config, months, contrib_map)
 
     return AccumulationResult(
         asset_values=asset_values,
@@ -101,12 +111,92 @@ def run_accumulation(config: SimConfig) -> AccumulationResult:
     )
 
 
+def _run_accumulation_mc(
+    config: SimConfig, months: int, contrib_map: dict[str, list],
+) -> dict[str, float]:
+    """Deterministic accumulation with blended return rate."""
+    asset_values = {a.name: a.value for a in config.assets}
+    monthly_rate = (1 + config.accumulation_return) ** (1 / 12) - 1
+
+    for month in range(months):
+        for name, val in asset_values.items():
+            asset_values[name] = val * (1 + monthly_rate)
+            if name in contrib_map:
+                for c in contrib_map[name]:
+                    asset_values[name] += c.monthly_amount
+
+    return asset_values
+
+
+def _run_accumulation_bootstrap(
+    config: SimConfig,
+    rng: np.random.Generator,
+    sampler: ReturnSampler,
+    months: int,
+    n: int,
+    num_assets: int,
+    contrib_map: dict[str, list],
+) -> dict[str, np.ndarray]:
+    """Stochastic accumulation with bootstrapped monthly returns.
+
+    Assets with a return_source get historical bootstrap returns.
+    Assets without get parametric monthly returns from mean_return/std_dev.
+    """
+    # Generate monthly returns: shape (n, months, num_assets)
+    asset_sources = [a.return_source for a in config.assets]
+
+    # Bootstrap returns for historical-source assets
+    means_monthly = np.array([(1 + a.mean_return) ** (1 / 12) - 1 for a in config.assets])
+    stds_monthly = np.array([a.std_dev / np.sqrt(12) for a in config.assets])
+    blend_weights = [a.bootstrap_blend for a in config.assets]
+
+    bootstrap_returns = sampler.bootstrap_correlated(
+        rng, asset_sources, n, months, months_per_period=1,
+        blend_weights=blend_weights, blend_means=means_monthly, blend_stds=stds_monthly,
+    )
+
+    for i, src in enumerate(asset_sources):
+        if src is None:
+            parametric = rng.normal(means_monthly[i], stds_monthly[i], size=(n, months))
+            bootstrap_returns[:, :, i] = parametric
+
+    # Build contribution arrays: shape (n, months, num_assets)
+    # Fixed contributions are constant; variable contributions are stochastic
+    fixed_contrib = np.zeros(num_assets)
+    variable_contribs = []  # list of (asset_idx, mean, std)
+    for i, asset in enumerate(config.assets):
+        if asset.name in contrib_map:
+            for c in contrib_map[asset.name]:
+                if c.is_variable and c.std_dev_pct > 0:
+                    variable_contribs.append((i, c.monthly_amount, c.monthly_amount * c.std_dev_pct))
+                else:
+                    fixed_contrib[i] += c.monthly_amount
+
+    # Pre-generate variable contribution amounts: shape (n, months)
+    contrib_array = np.tile(fixed_contrib, (n, months, 1))  # (n, months, num_assets)
+    for asset_idx, mean, std in variable_contribs:
+        var_amounts = rng.normal(mean, std, size=(n, months))
+        var_amounts = np.maximum(var_amounts, 0)  # RSU vesting can't be negative
+        contrib_array[:, :, asset_idx] += var_amounts
+
+    # Vectorized monthly accumulation: shape (n, num_assets)
+    values = np.tile(
+        np.array([a.value for a in config.assets]), (n, 1),
+    )  # (n, num_assets)
+
+    for month in range(months):
+        values = values * (1 + bootstrap_returns[:, month, :]) + contrib_array[:, month, :]
+
+    return {a.name: values[:, i] for i, a in enumerate(config.assets)}
+
+
 def run(config: SimConfig) -> SimResult:
     """Run the full two-phase simulation."""
     rng = np.random.default_rng(config.seed)
+    sampler = _build_sampler(config)
 
-    # Phase 1: Accumulation (deterministic)
-    accum = run_accumulation(config)
+    # Phase 1: Accumulation
+    accum = run_accumulation(config, rng, sampler)
 
     # Phase 2: Drawdown (Monte Carlo)
     n = config.num_simulations
@@ -114,10 +204,33 @@ def run(config: SimConfig) -> SimResult:
     num_assets = len(config.assets)
 
     # Initial values from accumulation
-    init_values = np.array([accum.asset_values[a.name] for a in config.assets])
-    init_total = init_values.sum()
+    # In mc mode: scalar per asset -> broadcast to (n, num_assets)
+    # In bootstrap mode: array(n) per asset -> stack to (n, num_assets)
+    first_val = next(iter(accum.asset_values.values()))
+    if isinstance(first_val, np.ndarray):
+        init_values = np.column_stack(
+            [accum.asset_values[a.name] for a in config.assets]
+        )  # (n, num_assets)
+    else:
+        init_values = np.tile(
+            np.array([accum.asset_values[a.name] for a in config.assets]),
+            (n, 1),
+        )  # (n, num_assets)
 
-    # Asset return parameters
+    # Apply retirement diversification: sell concentrated positions, pay cap gains tax
+    # Build the drawdown return sources (may differ from accumulation sources)
+    drawdown_sources = [a.return_source for a in config.assets]
+    for i, asset in enumerate(config.assets):
+        if asset.retire_to_source is not None:
+            # Compute capital gains tax on the sale
+            basis = asset.cost_basis if asset.cost_basis is not None else 0.0
+            gain = np.maximum(init_values[:, i] - basis, 0.0)
+            tax = gain * config.tax.rate_for(asset.tax_type)
+            init_values[:, i] -= tax
+            # Switch return source for drawdown
+            drawdown_sources[i] = asset.retire_to_source
+
+    # Asset return parameters (for parametric fallback)
     means = np.array([a.mean_return for a in config.assets])
     stds = np.array([a.std_dev for a in config.assets])
 
@@ -133,7 +246,6 @@ def run(config: SimConfig) -> SimResult:
     # Map 529 plans to annual offsets across all 4 college years
     plan_529_offsets_by_year: dict[int, float] = {}
     for plan in config.plans_529:
-        # College start year relative to retirement
         college_yr_from_retirement = plan.child_college_start_year - config.years_to_retirement
         val = accum.plan_529_values.get(plan.name, 0)
         annual_offset = val / 4
@@ -147,11 +259,9 @@ def run(config: SimConfig) -> SimResult:
     asset_wealth[:, 0, :] = init_values
     dist_rates = np.zeros((n, yrs))
 
-    # Generate returns: shape (n, yrs, num_assets), clamped at -99%
-    returns = rng.normal(
-        means[np.newaxis, np.newaxis, :],
-        stds[np.newaxis, np.newaxis, :],
-        size=(n, yrs, num_assets),
+    # Generate drawdown returns: shape (n, yrs, num_assets), clamped at -99%
+    returns = _generate_drawdown_returns(
+        config, rng, sampler, n, yrs, num_assets, means, stds, drawdown_sources,
     )
     returns = np.maximum(returns, -0.99)
 
@@ -159,16 +269,11 @@ def run(config: SimConfig) -> SimResult:
     inflation = rng.normal(config.inflation_mean, config.inflation_std, size=(n, yrs))
     cum_inflation = np.cumprod(1 + inflation, axis=1)
 
-    # Mortgage state per simulation (same for all since accumulation is deterministic)
-    mort_principal_init = accum.mortgage_principal
-
-    # Run year-by-year drawdown
-    # We need per-sim mortgage tracking, but since mortgage is deterministic,
-    # we can precompute it
+    # Precompute mortgage schedule (deterministic)
     mort_principals = np.full(yrs + 1, 0.0)
     mort_costs = np.zeros(yrs)
     if config.mortgage:
-        mort_principals[0] = mort_principal_init
+        mort_principals[0] = accum.mortgage_principal
         for yr in range(yrs):
             new_p, cost = annual_mortgage_step(mort_principals[yr], config.mortgage)
             mort_principals[yr + 1] = new_p
@@ -205,7 +310,6 @@ def run(config: SimConfig) -> SimResult:
         # 2. Add future costs (college), inflation-adjusted, minus 529 offset
         if future_costs_by_year[year] > 0:
             nominal_costs = future_costs_by_year[year] * infl_factor
-            # Apply 529 offset for this college year (pre-divided across 4 years)
             if year in plan_529_offsets_by_year:
                 offset_annual = plan_529_offsets_by_year[year]
                 nominal_costs = np.maximum(nominal_costs - offset_annual, 0)
@@ -249,6 +353,58 @@ def run(config: SimConfig) -> SimResult:
         dist_rates=dist_rates,
         accumulation=accum,
         config=config,
+    )
+
+
+def _generate_drawdown_returns(
+    config: SimConfig,
+    rng: np.random.Generator,
+    sampler: ReturnSampler | None,
+    n: int,
+    yrs: int,
+    num_assets: int,
+    means: np.ndarray,
+    stds: np.ndarray,
+    drawdown_sources: list[str | None] | None = None,
+) -> np.ndarray:
+    """Generate annual returns array of shape (n, yrs, num_assets).
+
+    bootstrap mode: block-bootstrap 12-month blocks for historical assets,
+                    parametric normal for the rest.
+    mc mode: parametric normal for all assets.
+
+    drawdown_sources overrides asset return_source (used for retirement diversification).
+    """
+    if config.method == "bootstrap" and sampler is not None:
+        asset_sources = drawdown_sources or [a.return_source for a in config.assets]
+        has_historical = any(s is not None for s in asset_sources)
+
+        if has_historical:
+            # Build blend weights — use drawdown source's blend weight
+            # For diversified assets (retire_to_source), use the target's blend weight (1.0)
+            blend_weights = []
+            for i, asset in enumerate(config.assets):
+                if asset.retire_to_source is not None:
+                    blend_weights.append(1.0)  # diversified assets use pure bootstrap of target
+                else:
+                    blend_weights.append(asset.bootstrap_blend)
+
+            # Bootstrap returns for historical-source assets
+            returns = sampler.bootstrap_correlated(
+                rng, asset_sources, n, yrs, months_per_period=12,
+                blend_weights=blend_weights, blend_means=means, blend_stds=stds,
+            )
+            # Fill parametric assets (NaN slots)
+            for i, src in enumerate(asset_sources):
+                if src is None:
+                    returns[:, :, i] = rng.normal(means[i], stds[i], size=(n, yrs))
+            return returns
+
+    # Default: all parametric normal
+    return rng.normal(
+        means[np.newaxis, np.newaxis, :],
+        stds[np.newaxis, np.newaxis, :],
+        size=(n, yrs, num_assets),
     )
 
 

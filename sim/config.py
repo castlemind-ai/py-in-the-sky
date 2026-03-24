@@ -17,6 +17,10 @@ class Asset:
     mean_return: float
     std_dev: float
     tax_type: str = "taxable"  # "roth" | "traditional" | "taxable" | "cash"
+    return_source: str | None = None  # key into SimConfig.return_sources
+    cost_basis: float | None = None  # for capital gains on diversification
+    retire_to_source: str | None = None  # switch return_source at retirement
+    bootstrap_blend: float = 1.0  # 1.0 = pure bootstrap, 0.5 = 50/50 blend with parametric
 
 
 @dataclass
@@ -122,9 +126,9 @@ class SimConfig:
     inflation_mean: float = 0.03
     inflation_std: float = 0.01
     num_simulations: int = 10_000
-    accumulation_return: float = 0.065  # blended annual return for accumulation phase
+    accumulation_return: float = 0.065  # blended annual return (mc mode only)
     method: str = "mc"  # "mc" or "bootstrap"
-    hist_returns_path: str | None = None
+    return_sources: dict[str, str] = field(default_factory=dict)  # name -> CSV path
     seed: int | None = None
     target_wealth: float = 0.0
 
@@ -189,7 +193,7 @@ def load_config(path: str | Path) -> SimConfig:
         num_simulations=raw.get("num_simulations", 10_000),
         accumulation_return=raw.get("accumulation_return", 0.065),
         method=raw.get("method", "mc"),
-        hist_returns_path=raw.get("hist_returns_path"),
+        return_sources=raw.get("return_sources", {}),
         seed=raw.get("seed"),
         target_wealth=raw.get("target_wealth", 0.0),
     )
