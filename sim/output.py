@@ -146,7 +146,7 @@ def plot_final_wealth_histogram(result: SimResult, ax: plt.Axes | None = None) -
 
     if result.config.target_wealth > 0:
         ax.axvline(x=result.config.target_wealth, color="green", linestyle="--",
-                    linewidth=2, label=f"Target (${result.config.target_wealth:,.0f})")
+                   linewidth=2, label=f"Target (${result.config.target_wealth:,.0f})")
 
     ax.set_xscale("log")
 
