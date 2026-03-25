@@ -44,6 +44,11 @@ def print_summary(result: SimResult) -> None:
             print(f"    {name:>25s}:  ${val:,.0f}")
     if config.mortgage:
         print(f"\n  Mortgage principal remaining: ${accum.mortgage_principal:,.0f}")
+    if config.target_wealth > 0 and isinstance(first_val, np.ndarray):
+        total_at_ret_arr = sum(vals.values())
+        pct_meets_target = (total_at_ret_arr >= config.target_wealth).mean() * 100
+        print(f"\n  Reaches target at retirement:  {pct_meets_target:.1f}%  "
+              f"(target: ${config.target_wealth:,.0f})")
 
     # Report retirement diversification if any assets have retire_to_source
     diversified = [a for a in config.assets if a.retire_to_source is not None]

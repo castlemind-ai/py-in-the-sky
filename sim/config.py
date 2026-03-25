@@ -172,6 +172,7 @@ class BlackSwanEvent:
     phase: str = "drawdown"  # "drawdown" or "accumulation"
     target_asset: str | None = None  # if set, only affects this asset (accumulation)
     contribution_impact: float | None = None  # multiplier on future contributions when triggered
+    duration_years: int = 0  # how long contribution_impact persists; 0 = permanent
 
 
 @dataclass
@@ -186,10 +187,17 @@ class SocialSecurityConfig:
 
 @dataclass
 class SpouseConfig:
-    """Minimal spouse config for dual Social Security streams."""
+    """Minimal spouse config for dual Social Security streams.
+
+    Full dual-income households are modeled by adding the spouse's contributions
+    and assets directly to the main config. This dataclass covers spouse SS income
+    and optional income shock modeling.
+    """
 
     social_security_monthly: float = 0.0  # spouse's monthly SS benefit in today's dollars
     claim_age: int = 67
+    income_disruption_probability: float = 0.0  # annual probability of losing SS income
+    income_disruption_duration_years: int = 1   # years SS income is zeroed when triggered
 
 
 @dataclass
