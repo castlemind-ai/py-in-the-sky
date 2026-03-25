@@ -3,12 +3,14 @@
 import numpy as np
 import pytest
 
-from sim.config import FutureCost, MortgageConfig, Plan529, SpendingSchedule
+from sim.config import AgeTransition, FutureCost, MortgageConfig, Plan529, SpendingSchedule
 from sim.events import (
     amortize_mortgage,
     annual_mortgage_step,
+    compute_rmd,
     gross_up_for_tax,
     grow_529,
+    resolve_active_spending_categories,
     resolve_future_costs,
 )
 
@@ -118,3 +120,62 @@ def test_grow_529_with_delayed_start():
     # First 6 months: no contributions. Next 6: $1k each = $6000
     result = grow_529(plan, 12, 0.0)
     assert result == pytest.approx(6000)
+
+
+# --- RMD tests ---
+
+def test_compute_rmd_before_73():
+    assert compute_rmd(1_000_000, 70) == 0.0
+    assert compute_rmd(1_000_000, 72) == 0.0
+
+
+def test_compute_rmd_at_73():
+    # IRS divisor at 73 is 26.5
+    assert compute_rmd(1_000_000, 73) == pytest.approx(1_000_000 / 26.5)
+
+
+def test_compute_rmd_at_80():
+    # IRS divisor at 80 is 20.2
+    assert compute_rmd(500_000, 80) == pytest.approx(500_000 / 20.2)
+
+
+def test_compute_rmd_zero_balance():
+    assert compute_rmd(0, 75) == 0.0
+
+
+# --- Age transition tests ---
+
+def test_resolve_active_spending_no_transitions():
+    spending = SpendingSchedule(categories={"food": 10000, "travel": 5000})
+    result = resolve_active_spending_categories(spending, age=60)
+    assert result == {"food": 10000, "travel": 5000}
+
+
+def test_resolve_active_spending_transition_fires_at_age():
+    spending = SpendingSchedule(
+        categories={"healthcare_pre": 30000},
+        age_transitions=[
+            AgeTransition(at_age=65, remove=["healthcare_pre"], add={"healthcare_post": 8000}),
+        ],
+    )
+    # Before age 65: original category present
+    before = resolve_active_spending_categories(spending, age=64)
+    assert "healthcare_pre" in before
+    assert "healthcare_post" not in before
+
+    # At age 65: transition fires
+    at = resolve_active_spending_categories(spending, age=65)
+    assert "healthcare_pre" not in at
+    assert at["healthcare_post"] == 8000
+
+
+def test_resolve_active_spending_multiple_transitions():
+    spending = SpendingSchedule(
+        categories={"a": 1000, "b": 2000},
+        age_transitions=[
+            AgeTransition(at_age=60, remove=["a"], add={"c": 3000}),
+            AgeTransition(at_age=65, remove=["b"], add={"d": 4000}),
+        ],
+    )
+    result = resolve_active_spending_categories(spending, age=67)
+    assert result == {"c": 3000, "d": 4000}

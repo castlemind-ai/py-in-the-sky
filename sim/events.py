@@ -114,6 +114,51 @@ def resolve_future_costs(costs: list[FutureCost], years: int) -> np.ndarray:
     return result
 
 
+def resolve_active_spending_categories(
+    spending: "SpendingSchedule",
+    current_age: int = 0,
+    age: int | None = None,
+) -> dict[str, float]:
+    """Return the effective spending categories after applying age transitions.
+
+    Starts from spending.categories, then fires each transition whose at_age
+    is <= current_age in ascending order, removing and adding categories.
+    """
+    effective_age = age if age is not None else current_age
+    categories = dict(spending.categories)
+    for transition in sorted(spending.age_transitions, key=lambda t: t.at_age):
+        if effective_age >= transition.at_age:
+            for key in transition.remove:
+                categories.pop(key, None)
+            categories.update(transition.add)
+    return categories
+
+
+# IRS Uniform Lifetime Table (age -> distribution period divisor), ages 73–120.
+# Source: IRS Publication 590-B, Appendix B, Table III.
+_IRS_ULT: dict[int, float] = {
+    73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
+    80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2,
+    87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1,
+    94: 9.5,  95: 8.9,  96: 8.4,  97: 7.8,  98: 7.3,  99: 6.8,  100: 6.4,
+    101: 6.0, 102: 5.6, 103: 5.2, 104: 4.9, 105: 4.6, 106: 4.3, 107: 4.1,
+    108: 3.9, 109: 3.7, 110: 3.5, 111: 3.4, 112: 3.3, 113: 3.1, 114: 3.0,
+    115: 2.9, 116: 2.8, 117: 2.7, 118: 2.5, 119: 2.3, 120: 2.0,
+}
+
+
+def compute_rmd(balance: float, age: int) -> float:
+    """Compute the IRS Required Minimum Distribution for a given balance and age.
+
+    Uses the IRS Uniform Lifetime Table (Publication 590-B, Table III).
+    Returns 0.0 if age < 73 (RMDs not yet required).
+    """
+    if age < 73 or balance <= 0:
+        return 0.0
+    divisor = _IRS_ULT.get(age, 2.0)  # age 120+ uses 2.0
+    return balance / divisor
+
+
 def gross_up_for_tax(net_amount: float, tax_rate: float) -> float:
     """Gross up a net spending amount to account for taxes on withdrawal."""
     if tax_rate >= 1.0:
