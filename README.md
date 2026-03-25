@@ -33,11 +33,22 @@ Generates four charts in `./output/` and prints a summary to stdout:
 
 ### Return modeling
 
-**Parametric** (`method: "mc"`): Normal or lognormal distribution with per-asset `mean_return` and `std_dev`. Set `return_distribution: "lognormal"` per asset for more realistic long-horizon modeling (no below -100% outcomes; positive skew in compounded returns).
+**Parametric** (`method: "mc"`): Normal or lognormal distribution with per-asset `mean_return` and `std_dev`. Inflation is drawn independently from `Normal(inflation_mean, inflation_std)`. Set `return_distribution: "lognormal"` per asset for more realistic long-horizon modeling (no below -100% outcomes; positive skew in compounded returns).
 
 **Bootstrap** (`method: "bootstrap"`): Block-bootstrap sampling from historical monthly return CSVs. For annual drawdown returns, 12 consecutive months are sampled and compounded, preserving within-year volatility clustering. All assets sharing historical sources use the same random start indices, preserving cross-asset correlation (e.g., stocks crash together).
 
 **Blended**: Per-asset `bootstrap_blend` (0.0–1.0) mixes bootstrap and parametric returns.
+
+**Correlated bootstrap inflation**: In bootstrap mode, set `inflation_source` to a key in `return_sources` to sample inflation from historical data using the **same random start indices** as asset returns. This preserves the inflation-return correlation present in historical data — a simulation that samples 1979 asset returns also experiences 1979 inflation, capturing stagflation as a coherent scenario rather than two independent draws. Use `inflation_blend` (0.0–1.0) to mix with parametric `Normal(inflation_mean, inflation_std)`.
+
+```yaml
+return_sources:
+  market: "data/VTI_monthly.csv"
+  cpi: "data/CPI_monthly.csv"
+
+inflation_source: "cpi"
+inflation_blend: 0.7   # 70% historical CPI, 30% parametric
+```
 
 #### Choosing `bootstrap_blend` for concentrated positions
 

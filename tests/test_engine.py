@@ -703,6 +703,73 @@ def test_drawdown_strategy_validation():
         validate_config(config)
 
 
+def test_bootstrap_inflation_correlated_with_returns(bootstrap_csv):
+    """inflation_source should produce correlated inflation via shared bootstrap indices."""
+    config_param = _simple_config(
+        assets=[Asset(name="A", value=500_000, mean_return=0.05, std_dev=0.15,
+                      tax_type="roth", return_source="test")],
+        method="bootstrap",
+        return_sources={"test": bootstrap_csv},
+        spending=SpendingSchedule(categories={"living": 30000}),
+        life_expectancy=60,
+        num_simulations=200,
+        seed=42,
+        # No inflation_source → parametric inflation
+    )
+    config_boot = _simple_config(
+        assets=[Asset(name="A", value=500_000, mean_return=0.05, std_dev=0.15,
+                      tax_type="roth", return_source="test")],
+        method="bootstrap",
+        return_sources={"test": bootstrap_csv},
+        spending=SpendingSchedule(categories={"living": 30000}),
+        inflation_source="test",  # same CSV; annual compounded returns used as inflation proxy
+        inflation_blend=1.0,
+        life_expectancy=60,
+        num_simulations=200,
+        seed=42,
+    )
+    r_param = run(config_param)
+    r_boot = run(config_boot)
+
+    # Bootstrap inflation draws different paths than parametric Normal(0.03, 0.01)
+    assert not np.array_equal(r_param.wealth, r_boot.wealth)
+    # Both should produce valid (non-negative) wealth arrays
+    assert np.all(r_boot.wealth >= 0)
+
+
+def test_bootstrap_inflation_blend(bootstrap_csv):
+    """inflation_blend < 1.0 should mix bootstrap and parametric inflation."""
+    def _config(blend):
+        return _simple_config(
+            assets=[Asset(name="A", value=500_000, mean_return=0.05, std_dev=0.15,
+                          tax_type="roth", return_source="test")],
+            method="bootstrap",
+            return_sources={"test": bootstrap_csv},
+            spending=SpendingSchedule(categories={"living": 20000}),
+            inflation_source="test",
+            inflation_blend=blend,
+            life_expectancy=60,
+            num_simulations=200,
+            seed=42,
+        )
+
+    r_pure = run(_config(1.0))
+    r_blend = run(_config(0.5))
+    assert not np.array_equal(r_pure.wealth, r_blend.wealth)
+
+
+def test_bootstrap_inflation_validation():
+    """inflation_source referencing unknown key should raise ConfigValidationError."""
+    from sim.config import ConfigValidationError, validate_config
+    config = _simple_config(
+        method="bootstrap",
+        return_sources={},
+        inflation_source="nonexistent",
+    )
+    with pytest.raises(ConfigValidationError, match="inflation_source"):
+        validate_config(config)
+
+
 def test_social_security_config_loaded(tmp_path):
     """load_config should parse social_security block correctly."""
     import yaml

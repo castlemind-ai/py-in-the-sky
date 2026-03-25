@@ -232,6 +232,11 @@ class SimConfig:
     # Set to 0 to disable. Tip: use 25–33x annual spending for a withdrawal-rate-based target.
     target_wealth: float = 0.0
     drawdown_strategy: str = "proportional"  # "proportional" or "tax_optimized"
+    # Bootstrap inflation from historical CPI data (bootstrap mode only).
+    # Must reference a key in return_sources. Shares random start indices with asset returns,
+    # preserving inflation-return correlation (e.g. 1970s stagflation).
+    inflation_source: str | None = None
+    inflation_blend: float = 1.0  # 1.0 = pure bootstrap, 0.0 = pure parametric Normal(mean,std)
 
     @property
     def years_to_retirement(self) -> int:
@@ -304,6 +309,13 @@ def validate_config(config: SimConfig) -> None:
             errors.append(
                 f"asset '{asset.name}' has invalid return_distribution '{asset.return_distribution}'. "
                 f"Must be one of: {sorted(valid_distributions)}"
+            )
+
+    # Validate inflation_source
+    if config.inflation_source is not None and config.method == "bootstrap":
+        if config.inflation_source not in config.return_sources:
+            errors.append(
+                f"inflation_source '{config.inflation_source}' not found in return_sources"
             )
 
     # Validate drawdown_strategy
@@ -436,6 +448,8 @@ def load_config(path: str | Path) -> SimConfig:
         seed=raw.get("seed"),
         target_wealth=raw.get("target_wealth", 0.0),
         drawdown_strategy=raw.get("drawdown_strategy", "proportional"),
+        inflation_source=raw.get("inflation_source"),
+        inflation_blend=raw.get("inflation_blend", 1.0),
     )
 
     validate_config(config)

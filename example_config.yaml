@@ -9,6 +9,8 @@ inflation_std: 0.01
 target_wealth: 500000   # 25x annual spending rule of thumb: set to ~25x your expected annual spend
 accumulation_return: 0.065
 method: "mc"  # or "bootstrap" to sample from historical returns
+# inflation_source: "cpi"     # bootstrap inflation from CPI data (must be a key in return_sources)
+# inflation_blend: 0.7        # 1.0 = pure bootstrap CPI, 0.0 = pure Normal(mean,std)
 drawdown_strategy: "proportional"  # "proportional" (default) or "tax_optimized"
 
 # Optional: historical return sources for bootstrap mode

@@ -300,14 +300,24 @@ def run(config: SimConfig) -> SimResult:
     asset_wealth[:, 0, :] = init_values
     dist_rates = np.zeros((n, yrs))
 
-    # Generate drawdown returns: shape (n, yrs, num_assets), clamped at -99%
-    returns = _generate_drawdown_returns(
+    # Generate drawdown returns and (optionally) correlated inflation.
+    # When inflation_source is set in bootstrap mode, inflation is sampled alongside
+    # asset returns using shared start indices — preserving inflation-return correlation.
+    returns, bootstrap_inflation = _generate_drawdown_returns(
         config, rng, sampler, n, yrs, num_assets, means, stds, drawdown_sources,
     )
     returns = np.maximum(returns, -0.99)
 
-    # Generate inflation: shape (n, yrs)
-    inflation = rng.normal(config.inflation_mean, config.inflation_std, size=(n, yrs))
+    # Inflation: shape (n, yrs)
+    if bootstrap_inflation is not None:
+        # Blend with parametric if inflation_blend < 1.0
+        if config.inflation_blend < 1.0:
+            param_infl = rng.normal(config.inflation_mean, config.inflation_std, size=(n, yrs))
+            inflation = config.inflation_blend * bootstrap_inflation + (1 - config.inflation_blend) * param_infl
+        else:
+            inflation = bootstrap_inflation
+    else:
+        inflation = rng.normal(config.inflation_mean, config.inflation_std, size=(n, yrs))
     cum_inflation = np.cumprod(1 + inflation, axis=1)
 
     # Precompute mortgage schedule (deterministic)
@@ -594,27 +604,51 @@ def _generate_drawdown_returns(
     means: np.ndarray,
     stds: np.ndarray,
     drawdown_sources: list[str | None] | None = None,
-) -> np.ndarray:
-    """Generate annual returns array of shape (n, yrs, num_assets).
+) -> tuple[np.ndarray, np.ndarray | None]:
+    """Generate annual returns of shape (n, yrs, num_assets) and optional correlated inflation.
+
+    Returns (returns, bootstrap_inflation) where bootstrap_inflation is shape (n, yrs)
+    when config.inflation_source is set in bootstrap mode, else None.
 
     bootstrap mode: block-bootstrap 12-month blocks for historical assets,
                     parametric for the rest.
     mc mode: parametric for all assets.
 
-    drawdown_sources overrides asset return_source (used for retirement diversification).
-    Per-asset return_distribution controls whether parametric draws are normal or lognormal.
+    When inflation_source is configured, inflation is appended as an extra slot in the
+    same bootstrap_correlated call, sharing start indices with asset returns and thereby
+    preserving inflation-return correlation (e.g. 1970s stagflation).
     """
     if config.method == "bootstrap" and sampler is not None:
         asset_sources = drawdown_sources or [a.return_source for a in config.assets]
-        has_historical = any(s is not None for s in asset_sources)
+        infl_source = config.inflation_source if config.inflation_source in (sampler.sources if sampler else {}) else None
+        has_historical = any(s is not None for s in asset_sources) or infl_source is not None
 
         if has_historical:
             blend_weights = [asset.bootstrap_blend for asset in config.assets]
 
-            returns = sampler.bootstrap_correlated(
-                rng, asset_sources, n, yrs, months_per_period=12,
-                blend_weights=blend_weights, blend_means=means, blend_stds=stds,
-            )
+            if infl_source:
+                # Append inflation as an extra slot so it shares random start indices
+                # with asset returns, preserving cross-series temporal correlation.
+                extended_sources = list(asset_sources) + [infl_source]
+                extended_means = np.append(means, config.inflation_mean)
+                extended_stds = np.append(stds, config.inflation_std)
+                extended_blends = blend_weights + [1.0]  # blend handled by caller
+
+                raw = sampler.bootstrap_correlated(
+                    rng, extended_sources, n, yrs, months_per_period=12,
+                    blend_weights=extended_blends,
+                    blend_means=extended_means,
+                    blend_stds=extended_stds,
+                )
+                returns = raw[:, :, :num_assets].copy()
+                bootstrap_inflation = raw[:, :, num_assets]
+            else:
+                returns = sampler.bootstrap_correlated(
+                    rng, asset_sources, n, yrs, months_per_period=12,
+                    blend_weights=blend_weights, blend_means=means, blend_stds=stds,
+                )
+                bootstrap_inflation = None
+
             # Fill parametric assets (NaN slots)
             for i, (src, asset) in enumerate(zip(asset_sources, config.assets)):
                 if src is None:
@@ -622,16 +656,16 @@ def _generate_drawdown_returns(
                         returns[:, :, i] = _draw_lognormal(rng, means[i], stds[i], (n, yrs))
                     else:
                         returns[:, :, i] = rng.normal(means[i], stds[i], size=(n, yrs))
-            return returns
+            return returns, bootstrap_inflation
 
-    # Default: all parametric
+    # Default: all parametric, no bootstrap inflation
     result = np.empty((n, yrs, num_assets))
     for i, asset in enumerate(config.assets):
         if asset.return_distribution == "lognormal":
             result[:, :, i] = _draw_lognormal(rng, means[i], stds[i], (n, yrs))
         else:
             result[:, :, i] = rng.normal(means[i], stds[i], size=(n, yrs))
-    return result
+    return result, None
 
 
 def _draw_lognormal(
