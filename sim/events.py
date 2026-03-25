@@ -66,18 +66,21 @@ def resolve_spending_year(
     mortgage: MortgageConfig | None,
     mortgage_principal: float,
     inflation_factor: float,
+    current_age: int = 0,
 ) -> tuple[float, float]:
     """Compute total annual spending for a given year.
 
     Returns (total_costs_nominal, new_mortgage_principal).
 
-    - Non-housing categories are inflation-adjusted.
+    - Applies age_transitions via resolve_active_spending_categories so that
+      category changes fire at the right ages (consistent with the drawdown loop).
     - School costs drop to zero after all kids finish (based on school_end_years).
     - Mortgage payment is fixed; non-mortgage housing inflates.
     """
     total = 0.0
+    active_categories = resolve_active_spending_categories(spending, current_age)
 
-    for category, amount in spending.categories.items():
+    for category, amount in active_categories.items():
         if category == "school":
             # Count how many kids are still in school this year
             kids_in_school = sum(1 for end_yr in spending.school_end_years if year < end_yr)

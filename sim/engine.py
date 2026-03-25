@@ -16,7 +16,6 @@ from sim.events import (
     months_since_purchase,
     resolve_active_spending_categories,
     resolve_future_costs,
-    resolve_spending_year,
 )
 from sim.returns import ReturnSampler
 
@@ -168,24 +167,26 @@ def _run_accumulation_bootstrap(
             bootstrap_returns[:, :, i] = parametric
 
     # Build contribution arrays: shape (n, months, num_assets)
-    # Fixed contributions may grow annually; variable contributions are stochastic
-    # Build per-month contribution array accounting for annual_growth_rate
+    # Fixed contributions may grow annually; variable contributions are stochastic.
+    # Vectorized: compute all months at once per contribution to avoid the inner month loop.
     contrib_array = np.zeros((n, months, num_assets))
+    _year_by_month = np.arange(months) // 12  # (months,)
 
     for i, asset in enumerate(config.assets):
         if asset.name not in contrib_map:
             continue
         for c in contrib_map[asset.name]:
-            for month in range(months):
-                year = month // 12
-                grown_base = c.monthly_amount * (1 + c.annual_growth_rate) ** year
-                if c.is_variable and c.std_dev_pct > 0:
-                    std = grown_base * c.std_dev_pct
-                    var_amounts = rng.normal(grown_base, std, size=n)
-                    var_amounts = np.maximum(var_amounts, 0)
-                    contrib_array[:, month, i] += var_amounts
-                else:
-                    contrib_array[:, month, i] += grown_base
+            grown_base_by_month = c.monthly_amount * (1 + c.annual_growth_rate) ** _year_by_month  # (months,)
+            if c.is_variable and c.std_dev_pct > 0:
+                std_by_month = grown_base_by_month * c.std_dev_pct  # (months,)
+                var_amounts = rng.normal(
+                    grown_base_by_month[np.newaxis, :],
+                    std_by_month[np.newaxis, :],
+                    size=(n, months),
+                )
+                contrib_array[:, :, i] += np.maximum(var_amounts, 0)
+            else:
+                contrib_array[:, :, i] += grown_base_by_month[np.newaxis, :]
 
     # Vectorized monthly accumulation: shape (n, num_assets)
     values = np.tile(
@@ -213,10 +214,15 @@ def _run_accumulation_bootstrap(
                     idx = asset_name_to_idx[event.target_asset]
                     values[triggers, idx] *= (1 + event.portfolio_impact)
 
-                    # Reduce future contributions for triggered simulations
+                    # Scale future contributions for triggered simulations.
+                    # duration_years=0 means permanent; >0 limits the impact window.
                     if event.contribution_impact is not None:
-                        remaining = slice(month + 1, months)
-                        contrib_array[triggers, remaining, idx] *= event.contribution_impact
+                        impact_end = (
+                            min(month + 1 + event.duration_years * 12, months)
+                            if event.duration_years > 0
+                            else months
+                        )
+                        contrib_array[triggers, month + 1:impact_end, idx] *= event.contribution_impact
                 else:
                     # Apply to entire portfolio
                     values[triggers, :] *= (1 + event.portfolio_impact)
@@ -338,6 +344,11 @@ def run(config: SimConfig) -> SimResult:
         (i for i, a in enumerate(config.assets) if a.tax_type == "taxable"), None
     )
 
+    # Track remaining years of spouse SS disruption per simulation
+    spouse_disrupted_years: np.ndarray | None = None
+    if config.spouse and config.spouse.income_disruption_probability > 0:
+        spouse_disrupted_years = np.zeros(n, dtype=int)
+
     for year in range(yrs):
         current_assets = asset_wealth[:, year, :]  # (n, num_assets)
         current_total = current_assets.sum(axis=1)  # (n,)
@@ -401,12 +412,34 @@ def run(config: SimConfig) -> SimResult:
 
         # 3. Social Security income offset (reduces portfolio withdrawal)
         ss_annual = _compute_ss_income(config, current_age, infl_factor)
+
+        # Apply spouse income disruption: zero out spouse SS for disrupted simulations
+        if spouse_disrupted_years is not None and ss_annual is not None and config.spouse:
+            # Trigger new disruptions for non-disrupted sims
+            newly_disrupted = (
+                (spouse_disrupted_years == 0)
+                & (rng.random(n) < config.spouse.income_disruption_probability)
+            )
+            spouse_disrupted_years[newly_disrupted] = config.spouse.income_disruption_duration_years
+            # Zero out spouse SS for currently disrupted sims
+            disrupted_mask = spouse_disrupted_years > 0
+            if disrupted_mask.any():
+                spouse_ss_only = config.spouse.social_security_monthly * 12 * infl_factor
+                ss_annual = ss_annual.copy()
+                ss_annual[disrupted_mask] = np.maximum(
+                    ss_annual[disrupted_mask] - spouse_ss_only[disrupted_mask], 0.0
+                )
+            # Decrement remaining disruption years
+            spouse_disrupted_years = np.maximum(spouse_disrupted_years - 1, 0)
+
         if ss_annual is not None:
             nominal_spending = np.maximum(nominal_spending - ss_annual, 0.0)
 
         # 4. Compute effective tax rates per asset (incorporates brackets, penalties)
         effective_tax_rates = _compute_effective_tax_rates(
             config, current_age, current_assets, n, num_assets,
+            nominal_spending=nominal_spending,
+            roth_basis=roth_basis,
         )
 
         # 5. Compute withdrawal weights and gross withdrawal
@@ -521,25 +554,41 @@ def _compute_effective_tax_rates(
     current_assets: np.ndarray,
     n: int,
     num_assets: int,
+    nominal_spending: np.ndarray | None = None,
+    roth_basis: dict[int, np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Compute per-asset effective tax rates as a (num_assets,) array.
+    """Compute per-asset effective tax rates as a (n, num_assets) array.
 
     Incorporates:
+    - Progressive brackets for traditional assets (uses median nominal_spending as estimate)
     - State capital gains rate for taxable assets
     - Early withdrawal penalty for traditional assets pre-59½
-    - Progressive brackets (flat rate per asset, brackets applied at gross-up stage)
+    - Roth earnings penalty for Roth assets pre-59½ (proportional to earnings fraction)
     """
-    rates = np.empty(num_assets)
+    rates = np.zeros((n, num_assets))
+    # Use median nominal spending as the per-sim withdrawal estimate for bracket calculation
+    est_withdrawal = float(np.median(nominal_spending)) if nominal_spending is not None else 0.0
+
     for i, asset in enumerate(config.assets):
-        base = config.tax.rate_for(asset.tax_type)
-
-        # Early withdrawal penalty for traditional accounts pre-59½
-        if (asset.tax_type == "traditional"
+        if asset.tax_type == "traditional":
+            base = config.tax.effective_income_rate(est_withdrawal)
+            if current_age < 59.5 and not asset.rule_of_55_eligible:
+                base += config.tax.early_withdrawal_penalty_rate
+            rates[:, i] = base
+        elif (asset.tax_type == "roth"
                 and current_age < 59.5
-                and not asset.rule_of_55_eligible):
-            base += config.tax.early_withdrawal_penalty_rate
+                and roth_basis is not None
+                and i in roth_basis
+                and config.tax.roth_earnings_penalty_rate > 0):
+            # Penalty applies only to the earnings portion (value above contribution basis)
+            basis = roth_basis[i]  # (n,)
+            total = current_assets[:, i]  # (n,)
+            earnings_fraction = np.maximum(1.0 - basis / np.maximum(total, 1e-12), 0.0)
+            rates[:, i] = (config.tax.rate_for(asset.tax_type)
+                           + earnings_fraction * config.tax.roth_earnings_penalty_rate)
+        else:
+            rates[:, i] = config.tax.rate_for(asset.tax_type)
 
-        rates[i] = base
     return rates
 
 
@@ -554,8 +603,13 @@ def _tax_optimized_withdrawal(
     """Compute withdrawal weights using tax-optimized sequencing.
 
     Drain order: cash → taxable → traditional → after_tax_401k → roth.
-    This preserves Roth accounts (tax-free growth) longest.
+    This order is FIXED by account type, not dynamically optimized by rate.
+    It preserves Roth accounts (tax-free growth) longest for the common case.
+    Users with atypical rate configurations (e.g. very low traditional rate)
+    should consider drawdown_strategy="proportional" and verify sequencing.
     Returns (weights, gross_withdrawal).
+
+    tax_rates may be shape (num_assets,) or (n, num_assets); both are supported.
     """
     # Drain priority by account type (lower number = drain first)
     _PRIORITY = {"cash": 0, "taxable": 1, "traditional": 2, "after_tax_401k": 3, "roth": 4}
@@ -563,7 +617,8 @@ def _tax_optimized_withdrawal(
         priorities = [_PRIORITY.get(t, 2) for t in tax_types]
     else:
         # Fall back to sorting by tax rate descending (highest-tax drained first, Roth last)
-        priorities = list(tax_rates)
+        flat = tax_rates if tax_rates.ndim == 1 else tax_rates.mean(axis=0)
+        priorities = list(flat)
     order = np.argsort(priorities)
     weights = np.zeros((n, num_assets))
     gross_withdrawal = np.zeros(n)
@@ -573,7 +628,8 @@ def _tax_optimized_withdrawal(
     for idx in order:
         if np.all(remaining_need <= 0):
             break
-        rate = tax_rates[idx]
+        # Support both 1D (num_assets,) and 2D (n, num_assets) tax_rates
+        rate = tax_rates[:, idx] if tax_rates.ndim == 2 else tax_rates[idx]
         available = current_assets[:, idx]
         # How much gross we need to cover remaining net need from this asset
         gross_needed = remaining_need / np.maximum(1 - rate, 0.01)

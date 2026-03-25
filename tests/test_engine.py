@@ -792,3 +792,201 @@ def test_social_security_config_loaded(tmp_path):
     assert config.social_security is not None
     assert config.social_security.monthly_benefit == 3000
     assert config.social_security.claim_age == 67
+
+
+def test_progressive_brackets_lower_gross_withdrawal():
+    """Progressive brackets should produce a lower gross withdrawal than the flat rate
+    when the effective rate is below the flat rate for the given spending level."""
+    from sim.config import TaxBracket, TaxConfig
+
+    # Flat rate of 35%
+    config_flat = _simple_config(
+        assets=[Asset(name="401k", value=2_000_000, mean_return=0.0, std_dev=0.0,
+                      tax_type="traditional")],
+        spending=SpendingSchedule(categories={"living": 40000}),
+        tax=TaxConfig(income_rate=0.35),
+        current_age=49, retirement_age=50, life_expectancy=52, num_simulations=10,
+    )
+    # Progressive brackets: $40k spending falls entirely in 12% bracket
+    config_progressive = _simple_config(
+        assets=[Asset(name="401k", value=2_000_000, mean_return=0.0, std_dev=0.0,
+                      tax_type="traditional")],
+        spending=SpendingSchedule(categories={"living": 40000}),
+        tax=TaxConfig(
+            income_rate=0.35,
+            tax_brackets=[
+                TaxBracket(threshold=50000, rate=0.12),
+                TaxBracket(threshold=100000, rate=0.22),
+                TaxBracket(threshold=200000, rate=0.35),
+            ],
+        ),
+        current_age=49, retirement_age=50, life_expectancy=52, num_simulations=10,
+    )
+    r_flat = run(config_flat)
+    r_prog = run(config_progressive)
+    # Lower effective rate → less gross withdrawn → more wealth remaining
+    assert r_prog.wealth[0, -1] > r_flat.wealth[0, -1]
+
+
+def test_roth_earnings_penalty_reduces_wealth_pre_59_half():
+    """Roth earnings penalty should reduce wealth when there are earnings above basis
+    and age < 59.5."""
+    # Retire at 55; contribute basis of $50k but asset has grown to $200k.
+    # Pre-59.5 years should incur penalty on the earnings fraction.
+    config_no_penalty = _simple_config(
+        assets=[Asset(name="Roth", value=200_000, mean_return=0.0, std_dev=0.0,
+                      tax_type="roth", roth_contribution_basis=50_000)],
+        spending=SpendingSchedule(categories={"living": 20000}),
+        tax=TaxConfig(roth_rate=0.0, roth_earnings_penalty_rate=0.0),
+        current_age=54, retirement_age=55, life_expectancy=57, num_simulations=10,
+    )
+    config_penalty = _simple_config(
+        assets=[Asset(name="Roth", value=200_000, mean_return=0.0, std_dev=0.0,
+                      tax_type="roth", roth_contribution_basis=50_000)],
+        spending=SpendingSchedule(categories={"living": 20000}),
+        tax=TaxConfig(roth_rate=0.0, roth_earnings_penalty_rate=0.10),
+        current_age=54, retirement_age=55, life_expectancy=57, num_simulations=10,
+    )
+    r_no_pen = run(config_no_penalty)
+    r_pen = run(config_penalty)
+    # Penalty increases effective withdrawal rate → less wealth remaining
+    assert r_pen.wealth[0, -1] < r_no_pen.wealth[0, -1]
+
+
+def test_roth_earnings_penalty_not_applied_at_59_half():
+    """Roth earnings penalty should NOT apply once age >= 59.5."""
+    # Retire at 60 — no penalty should be applied
+    config_no_penalty = _simple_config(
+        assets=[Asset(name="Roth", value=200_000, mean_return=0.0, std_dev=0.0,
+                      tax_type="roth", roth_contribution_basis=50_000)],
+        spending=SpendingSchedule(categories={"living": 20000}),
+        tax=TaxConfig(roth_rate=0.0, roth_earnings_penalty_rate=0.0),
+        current_age=59, retirement_age=60, life_expectancy=62, num_simulations=10,
+    )
+    config_penalty = _simple_config(
+        assets=[Asset(name="Roth", value=200_000, mean_return=0.0, std_dev=0.0,
+                      tax_type="roth", roth_contribution_basis=50_000)],
+        spending=SpendingSchedule(categories={"living": 20000}),
+        tax=TaxConfig(roth_rate=0.0, roth_earnings_penalty_rate=0.10),
+        current_age=59, retirement_age=60, life_expectancy=62, num_simulations=10,
+    )
+    r_no_pen = run(config_no_penalty)
+    r_pen = run(config_penalty)
+    # At age 60 (>= 59.5) no penalty applies; wealth should be identical
+    np.testing.assert_array_equal(r_pen.wealth, r_no_pen.wealth)
+
+
+def test_black_swan_duration_years_restores_contributions():
+    """contribution_impact with duration_years > 0 should not affect contributions after
+    the impact window ends."""
+    from sim.config import BlackSwanEvent
+
+    # Permanent impact (duration_years=0): contributions halved for all remaining months
+    config_permanent = _simple_config(
+        assets=[Asset(name="A", value=0, mean_return=0.0, std_dev=0.0, tax_type="roth",
+                      return_source="test")],
+        contributions=[Contribution(name="Save", monthly_amount=1000, target_account="A")],
+        black_swans=[BlackSwanEvent(
+            name="Job loss", probability=1.0,  # always triggers
+            phase="accumulation", target_asset="A",
+            contribution_impact=0.5, duration_years=0,
+        )],
+        accumulation_return=0.0,
+        current_age=45, retirement_age=50, life_expectancy=52, num_simulations=10,
+        method="bootstrap",
+    )
+    # Temporary impact (duration_years=1): contributions halved for only 12 months
+    config_temporary = _simple_config(
+        assets=[Asset(name="A", value=0, mean_return=0.0, std_dev=0.0, tax_type="roth",
+                      return_source="test")],
+        contributions=[Contribution(name="Save", monthly_amount=1000, target_account="A")],
+        black_swans=[BlackSwanEvent(
+            name="Job loss", probability=1.0,
+            phase="accumulation", target_asset="A",
+            contribution_impact=0.5, duration_years=1,
+        )],
+        accumulation_return=0.0,
+        current_age=45, retirement_age=50, life_expectancy=52, num_simulations=10,
+        method="bootstrap",
+    )
+    import csv as _csv
+    import tempfile, os
+
+    # Create a minimal bootstrap CSV with constant 0% returns
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".csv", delete=False) as f:
+        tmp_path = f.name
+        header = ["Date", "Open", "High", "Low", "Close ", "Adj Close ", "Volume", "Month-over-month"]
+        w = _csv.writer(f)
+        w.writerow(header)
+        for i in range(60):
+            ret = "0.0" if i < 59 else ""
+            w.writerow([f"M{i}", "100", "100", "100", "100", "100", "1000", ret])
+
+    try:
+        config_permanent.return_sources = {"test": tmp_path}
+        config_temporary.return_sources = {"test": tmp_path}
+        accum_perm = run_accumulation(config_permanent,
+                                      rng=np.random.default_rng(1),
+                                      sampler=__import__("sim.returns", fromlist=["ReturnSampler"]).ReturnSampler.from_config({"test": tmp_path}))
+        accum_temp = run_accumulation(config_temporary,
+                                      rng=np.random.default_rng(1),
+                                      sampler=__import__("sim.returns", fromlist=["ReturnSampler"]).ReturnSampler.from_config({"test": tmp_path}))
+        # Temporary disruption restores contributions → higher final value
+        perm_val = np.median(accum_perm.asset_values["A"])
+        temp_val = np.median(accum_temp.asset_values["A"])
+        assert temp_val > perm_val
+    finally:
+        os.unlink(tmp_path)
+
+
+def test_spouse_income_disruption_reduces_ss():
+    """Spouse income_disruption_probability=1.0 should always zero spouse SS income,
+    leading to more portfolio withdrawal and lower final wealth."""
+    from sim.config import SpouseConfig
+
+    spending = SpendingSchedule(categories={"living": 50000})
+    assets = [Asset(name="A", value=3_000_000, mean_return=0.0, std_dev=0.0, tax_type="roth")]
+
+    config_no_disruption = _simple_config(
+        assets=assets,
+        spending=spending,
+        spouse=SpouseConfig(social_security_monthly=2000, claim_age=50,
+                            income_disruption_probability=0.0),
+        life_expectancy=60, current_age=49, retirement_age=50, num_simulations=20, seed=7,
+    )
+    config_always_disrupted = _simple_config(
+        assets=assets,
+        spending=spending,
+        spouse=SpouseConfig(social_security_monthly=2000, claim_age=50,
+                            income_disruption_probability=1.0,
+                            income_disruption_duration_years=100),
+        life_expectancy=60, current_age=49, retirement_age=50, num_simulations=20, seed=7,
+    )
+    r_ok = run(config_no_disruption)
+    r_disrupted = run(config_always_disrupted)
+    # Always-disrupted: spouse SS is always zeroed → higher withdrawal → lower final wealth
+    assert r_disrupted.wealth[0, -1] < r_ok.wealth[0, -1]
+
+
+def test_resolve_spending_year_applies_age_transitions():
+    """resolve_spending_year should apply age_transitions when current_age is provided."""
+    from sim.events import resolve_spending_year
+    from sim.config import AgeTransition, SpendingSchedule
+
+    spending = SpendingSchedule(
+        categories={"living": 60000, "work_costs": 5000},
+        age_transitions=[
+            AgeTransition(at_age=65, remove=["work_costs"], add={"medicare": 2000}),
+        ],
+    )
+    # Before age 65: work_costs present, medicare absent
+    total_pre, _ = resolve_spending_year(spending, year=0, mortgage=None,
+                                          mortgage_principal=0.0, inflation_factor=1.0,
+                                          current_age=60)
+    assert total_pre == pytest.approx(65000.0)
+
+    # At age 65: work_costs removed, medicare added
+    total_post, _ = resolve_spending_year(spending, year=0, mortgage=None,
+                                           mortgage_principal=0.0, inflation_factor=1.0,
+                                           current_age=65)
+    assert total_post == pytest.approx(62000.0)
