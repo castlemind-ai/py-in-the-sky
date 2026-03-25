@@ -21,8 +21,16 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import ssl
 import urllib.request
 from pathlib import Path
+
+try:
+    import certifi
+    _SSL_CTX: ssl.SSLContext | None = ssl.create_default_context(cafile=certifi.where())
+except ImportError:
+    _SSL_CTX = None  # fall back to system certs
+
 
 FRED_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
 DEFAULT_OUT = Path(__file__).parent.parent / "data" / "CPI_monthly.csv"
@@ -31,16 +39,17 @@ DEFAULT_OUT = Path(__file__).parent.parent / "data" / "CPI_monthly.csv"
 def fetch_cpi(start: str | None = None, out: Path = DEFAULT_OUT) -> None:
     print(f"Fetching CPIAUCSL from FRED...", file=sys.stderr)
     try:
-        with urllib.request.urlopen(FRED_URL, timeout=30) as resp:
+        with urllib.request.urlopen(FRED_URL, timeout=30, context=_SSL_CTX) as resp:
             raw = resp.read().decode("utf-8")
     except Exception as e:
         print(f"Error: could not download CPI data: {e}", file=sys.stderr)
         sys.exit(1)
 
     lines = raw.strip().splitlines()
-    # FRED CSV: header "DATE,CPIAUCSL", then rows chronologically oldest-first
+    # FRED CSV: header "observation_date,CPIAUCSL", then rows chronologically oldest-first
     reader = csv.DictReader(lines)
-    rows = [(r["DATE"], float(r["CPIAUCSL"])) for r in reader if r["CPIAUCSL"].strip()]
+    date_col = "observation_date" if "observation_date" in (reader.fieldnames or []) else "DATE"
+    rows = [(r[date_col], float(r["CPIAUCSL"])) for r in reader if r["CPIAUCSL"].strip()]
 
     if not rows:
         print("Error: no data rows found in FRED response", file=sys.stderr)
