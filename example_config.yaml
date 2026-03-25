@@ -6,9 +6,10 @@ life_expectancy: 90
 num_simulations: 10000
 inflation_mean: 0.03
 inflation_std: 0.01
-target_wealth: 500000
+target_wealth: 500000   # 25x annual spending rule of thumb: set to ~25x your expected annual spend
 accumulation_return: 0.065
 method: "mc"  # or "bootstrap" to sample from historical returns
+drawdown_strategy: "proportional"  # "proportional" (default) or "tax_optimized"
 
 # Optional: historical return sources for bootstrap mode
 # return_sources:
@@ -18,7 +19,23 @@ method: "mc"  # or "bootstrap" to sample from historical returns
 tax:
   income_rate: 0.35
   capital_gains_rate: 0.20
-  roth_rate: 0.0
+  # state_capital_gains_rate: 0.133   # add for CA residents (~13.3%); combined = ~33%
+  early_withdrawal_penalty_rate: 0.10  # IRS 10% penalty for pre-59½ traditional withdrawals
+  roth_earnings_penalty_rate: 0.10     # penalty on Roth earnings withdrawn pre-59½
+  # Progressive brackets (optional; replaces flat income_rate for traditional withdrawals)
+  # tax_brackets:
+  #   - threshold: 44725
+  #     rate: 0.12
+  #   - threshold: 95375
+  #     rate: 0.22
+  #   - threshold: 201050
+  #     rate: 0.24
+  #   - threshold: 383900
+  #     rate: 0.32
+  #   - threshold: 487450
+  #     rate: 0.35
+  #   - threshold: 731200
+  #     rate: 0.37
 
 assets:
   - name: "Roth IRA"
@@ -26,12 +43,16 @@ assets:
     mean_return: 0.065
     std_dev: 0.15
     tax_type: "roth"
+    roth_contribution_basis: 30000  # track basis for pre-59½ penalty-free withdrawals
 
   - name: "401k"
     value: 200000
     mean_return: 0.065
     std_dev: 0.15
     tax_type: "traditional"
+    rule_of_55_eligible: true  # exempt from 10% penalty if retired at 55+
+    is_401k_plan: true         # counts toward $70k annual 401k limit
+    # return_distribution: "lognormal"  # use lognormal for more realistic long-horizon modeling
 
   - name: "Brokerage"
     value: 300000
@@ -44,13 +65,25 @@ assets:
     mean_return: 0.10
     std_dev: 0.30
     tax_type: "taxable"
-    # return_source: "stock"  # uncomment with bootstrap mode
+    # return_source: "stock"      # uncomment with bootstrap mode
+    # retire_to_source: "market"  # sell at retirement, reinvest in index
+    # cost_basis: 150000          # for cap gains calculation at retirement
+    # bootstrap_blend: 0.5        # 0.4–0.6 recommended for single-stock positions
+    #                             # (1.0 = pure historical, may understate risk due to survivorship bias)
 
   - name: "Cash"
     value: 50000
     mean_return: 0.01
     std_dev: 0.005
     tax_type: "cash"
+
+  # Mega backdoor Roth example (after-tax 401k contribution, auto-converted to Roth):
+  # - name: "Mega Roth"
+  #   value: 0
+  #   mean_return: 0.065
+  #   std_dev: 0.15
+  #   tax_type: "after_tax_401k"   # tax-free growth and withdrawals; basis = contributions
+  #   is_401k_plan: true           # counts toward $70k total 401k limit
 
 mortgage:
   purchase_price: 800000
@@ -76,6 +109,7 @@ contributions:
     target_account: "Company Stock"
     is_variable: true
     std_dev_pct: 0.20
+    # annual_growth_rate: 0.05   # 5% annual increase in grant value (e.g. refreshes + promotions)
 
 plans_529:
   - name: "Child 1 529"
@@ -91,9 +125,15 @@ spending:
     groceries: 10000
     car: 8000
     travel: 10000
-    healthcare: 8000
+    healthcare_pre_medicare: 30000   # expensive during Medicare gap (55–65)
     other: 10000
   school_end_years: [14]
+  # Age transitions: swap spending categories at key ages
+  age_transitions:
+    - at_age: 65
+      remove: [healthcare_pre_medicare]
+      add:
+        healthcare_post_medicare: 8000   # drops sharply once Medicare begins
 
 future_costs:
   - name: "Child 1 College"
@@ -102,12 +142,43 @@ future_costs:
     duration: 4
     inflation_adjusted: true
 
+# Social Security — reduces portfolio withdrawal once benefits begin
+social_security:
+  monthly_benefit: 3500     # in today's dollars at full retirement age
+  claim_age: 67
+  inflation_adjusted: true
+  # early_claim_reduction: 0.30   # ~30% reduction if claiming at 62
+
+# Spouse's Social Security stream (optional)
+# spouse:
+#   social_security_monthly: 2000
+#   claim_age: 67
+
+# Roth conversion ladder — convert traditional → Roth each year before 59½
+# to build a penalty-free withdrawal pool for the 55–59½ window
+# roth_conversions:
+#   - start_age: 55
+#     end_age: 59
+#     annual_amount: 80000
+#     source_account: "401k"
+#     target_account: "Roth IRA"
+
 black_swans:
   - name: "Medical Emergency"
     probability: 0.02
     cost: 100000
+    phase: "drawdown"
 
   - name: "Market Crash"
     probability: 0.05
     cost: 0
     portfolio_impact: -0.30
+    phase: "drawdown"
+
+  # Accumulation-phase event: employer stock drops + RSU income cut
+  # - name: "Employer Distress"
+  #   probability: 0.05
+  #   portfolio_impact: -0.40
+  #   phase: "accumulation"
+  #   target_asset: "Company Stock"
+  #   contribution_impact: 0.0   # zero out future RSU contributions
